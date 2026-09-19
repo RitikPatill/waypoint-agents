@@ -55,7 +55,8 @@ flowchart LR
 uv sync
 cp .env.example .env
 # edit .env — set ANTHROPIC_API_KEY
-uv run waypoint --version   # works now (M1)
+uv run waypoint --version   # works now
+uv run pytest               # agent core tests pass without an API key (M2)
 uv run waypoint serve       # available in M3
 ```
 
@@ -71,11 +72,15 @@ docker compose up
 ```
 src/waypoint/       # core library
   cli.py            # typer CLI entry point
-  engine.py         # durable execution engine  (M2+)
-  agent.py          # agent runner + tool loop  (M2+)
-  events.py         # event log (SQLite)         (M2+)
+  tools.py          # Tool + ToolResult primitives
+  agent.py          # Agent: Anthropic tool-use loop
+  builtin_tools.py  # fetch_url, sum_numbers
+  engine.py         # durable execution engine  (M3+)
+  events.py         # event log (SQLite)         (M3+)
   api.py            # FastAPI + SSE              (M3+)
 tests/
+  test_version.py   # CLI smoke test
+  test_agent.py     # agent loop tests (mocked client)
 examples/
   research_team/    # Planner → Researcher       (M4+)
   code_reviewer/    # Reader → Critic → Summary  (M4+)
@@ -87,20 +92,25 @@ docs/
 | Milestone | Status | Description |
 |---|---|---|
 | M1 | ✅ done | Scaffold, README, CLI stub, CI wiring |
-| M2 | planned | Event log, durable engine, checkpoint/resume |
+| M2 | ✅ done | Agent core: Tool primitive, tool-use loop, builtin tools |
 | M3 | planned | FastAPI + SSE backend, timeline UI |
 | M4 | planned | Example workflows, Docker Compose |
 
-## What works now (M1)
+## What works now (M2)
 
-The scaffold is complete. If you clone and run `uv sync && uv run waypoint --version` today, you get:
+### Agent primitives
+
+- **`Tool` + `ToolResult`** (`src/waypoint/tools.py`) — wraps any Python callable (sync or async) with an Anthropic-compatible JSON Schema; `to_api_dict()` produces the shape the SDK expects; `dispatch(**kwargs)` runs sync callables in a thread via `asyncio.to_thread`
+- **`Agent`** (`src/waypoint/agent.py`) — drives a full Anthropic tool-use loop until `stop_reason == "end_turn"`; collects tool-use blocks, dispatches them concurrently with `asyncio.gather`, feeds results back as `tool_result` user turns
+- **`AgentResult`** — carries the final text output and the full message history (for handoffs in M4)
+- **Builtin tools** (`src/waypoint/builtin_tools.py`) — `fetch_url` (httpx GET, first 4000 chars) and `sum_numbers` (sum of a list)
+- **Tests** (`tests/test_agent.py`) — three tests with a mocked `AsyncAnthropic` client; no real API calls, no network required
+
+### M1 (still works)
 
 - **CLI entry point** — `waypoint --version` via Typer (`src/waypoint/cli.py`)
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
-- **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest pointed at `tests/`
-- **Environment config** — `.env.example` documents `ANTHROPIC_API_KEY`
-- **Test coverage** — `tests/test_version.py` asserts the version constant; proves import path and CI wiring
-- **Repo skeleton** — `src/waypoint/`, `tests/`, `docs/`, `examples/` directories committed; future modules stubbed in project layout below
+- **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
 Everything else (`engine.py`, `events.py`, `api.py`, example workflows, the timeline UI) is planned — see the milestone table.
 
