@@ -11,6 +11,7 @@ class Tool:
     description: str
     input_schema: dict  # JSON Schema {"type":"object","properties":...}
     fn: Callable[..., Any]  # sync or async
+    idempotency_key: str | None = None
 
     def to_api_dict(self) -> dict:
         return {
