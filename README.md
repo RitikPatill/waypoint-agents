@@ -43,7 +43,7 @@ flowchart LR
     Replay --> EventLog
 ```
 
-**Event types:** `RunStarted`, `AgentStepStarted`, `LLMCallCommitted`, `ToolCallCommitted`, `HandoffCommitted`, `AgentStepFinished`, `RunFinished`, `RunFailed`
+**Event types:** `RUN_STARTED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
 
 **The invariant:** no side effect happens without a preceding committed event, and no event is committed until its side effect has succeeded and been persisted with its result. Replay is a pure fold over the log.
 
@@ -56,8 +56,8 @@ uv sync
 cp .env.example .env
 # edit .env — set ANTHROPIC_API_KEY
 uv run waypoint --version   # works now
-uv run pytest               # agent core tests pass without an API key (M2)
-uv run waypoint serve       # available in M3
+uv run pytest               # all tests pass without an API key (M3)
+uv run waypoint serve       # available in M4
 ```
 
 ### With Docker
@@ -77,10 +77,11 @@ src/waypoint/       # core library
   builtin_tools.py  # fetch_url, sum_numbers
   engine.py         # durable execution engine  (M3+)
   events.py         # event log (SQLite)         (M3+)
-  api.py            # FastAPI + SSE              (M3+)
+  api.py            # FastAPI + SSE              (M4+)
 tests/
   test_version.py   # CLI smoke test
   test_agent.py     # agent loop tests (mocked client)
+  test_engine.py    # durable engine scenarios   (M3+)
 examples/
   research_team/    # Planner → Researcher       (M4+)
   code_reviewer/    # Reader → Critic → Summary  (M4+)
@@ -93,18 +94,25 @@ docs/
 |---|---|---|
 | M1 | ✅ done | Scaffold, README, CLI stub, CI wiring |
 | M2 | ✅ done | Agent core: Tool primitive, tool-use loop, builtin tools |
-| M3 | planned | FastAPI + SSE backend, timeline UI |
-| M4 | planned | Example workflows, Docker Compose |
+| M3 | ✅ done | Event-sourced durable engine: SQLite event log, write-ahead pattern, replay + resume |
+| M4 | planned | FastAPI + SSE backend, timeline UI |
+| M5 | planned | Example workflows, Docker Compose |
 
-## What works now (M2)
+## What works now (M3)
 
-### Agent primitives
+### Durable engine
+
+- **`events.py`** (`src/waypoint/events.py`) — SQLite-backed event log with WAL mode; `migrate()` sets up the schema, `append()` writes a single event, `list_events()` reads in order. Event types: `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `AGENT_STEP_FINISHED`, and more.
+- **`replay(db_path, run_id)`** — pure fold over the event log; returns a `ReplayState` with all committed LLM responses and tool results. No side effects.
+- **`DurableRunner`** (`src/waypoint/engine.py`) — write-ahead agent loop: appends `*_STARTED` before the side effect, `*_COMMITTED` after. On startup it replays the log and skips already-completed steps — no duplicate LLM charges, no double tool execution.
+- **Idempotency key** — `Tool.idempotency_key: str | None` stored in `TOOL_CALL_STARTED` events for future deduplication.
+- **Tests** (`tests/test_engine.py`) — five scenarios with mocked client and temp SQLite: replay empty, happy path event ordering, crash between LLM writes, tool result replayed from log, crash between tool writes triggers re-execution.
+
+### M2 (still works)
 
 - **`Tool` + `ToolResult`** (`src/waypoint/tools.py`) — wraps any Python callable (sync or async) with an Anthropic-compatible JSON Schema; `to_api_dict()` produces the shape the SDK expects; `dispatch(**kwargs)` runs sync callables in a thread via `asyncio.to_thread`
 - **`Agent`** (`src/waypoint/agent.py`) — drives a full Anthropic tool-use loop until `stop_reason == "end_turn"`; collects tool-use blocks, dispatches them concurrently with `asyncio.gather`, feeds results back as `tool_result` user turns
-- **`AgentResult`** — carries the final text output and the full message history (for handoffs in M4)
 - **Builtin tools** (`src/waypoint/builtin_tools.py`) — `fetch_url` (httpx GET, first 4000 chars) and `sum_numbers` (sum of a list)
-- **Tests** (`tests/test_agent.py`) — three tests with a mocked `AsyncAnthropic` client; no real API calls, no network required
 
 ### M1 (still works)
 
@@ -112,7 +120,7 @@ docs/
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-Everything else (`engine.py`, `events.py`, `api.py`, example workflows, the timeline UI) is planned — see the milestone table.
+`api.py`, example workflows, and the timeline UI are planned — see the milestone table.
 
 ## Contributing
 
