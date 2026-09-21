@@ -57,6 +57,7 @@ cp .env.example .env
 # edit .env — set ANTHROPIC_API_KEY
 uv run waypoint --version   # works now
 uv run pytest               # all tests pass without an API key
+uv run waypoint serve       # resume any interrupted runs
 uv run python examples/research_team.py  # requires ANTHROPIC_API_KEY
 ```
 
@@ -80,10 +81,11 @@ src/waypoint/       # core library
   workflow.py       # Workflow + WorkflowRunner  (M4+)
   api.py            # FastAPI + SSE              (planned)
 tests/
-  test_version.py   # CLI smoke test
-  test_agent.py     # agent loop tests (mocked client)
-  test_engine.py    # durable engine scenarios   (M3+)
-  test_workflow.py  # multi-agent workflow tests (M4+)
+  test_version.py        # CLI smoke test
+  test_agent.py          # agent loop tests (mocked client)
+  test_engine.py         # durable engine scenarios      (M3+)
+  test_workflow.py       # multi-agent workflow tests    (M4+)
+  test_crash_resume.py   # crash + resume integration    (M5+)
 examples/
   research_team.py  # Planner → Researcher       (M4+)
 docs/
@@ -97,7 +99,21 @@ docs/
 | M2 | ✅ done | Agent core: Tool primitive, tool-use loop, builtin tools |
 | M3 | ✅ done | Event-sourced durable engine: SQLite event log, write-ahead pattern, replay + resume |
 | M4 | ✅ done | Multi-agent workflows + handoffs: `Workflow`, `WorkflowRunner`, `HANDOFF_COMMITTED` event, `research_team` example |
-| M5 | planned | FastAPI + SSE backend, timeline UI, Docker Compose |
+| M5 | ✅ done | Crash + resume: `waypoint serve` replays interrupted runs; `--kill-after N` flag; exactly-once tool execution verified by integration test |
+| M6 | planned | FastAPI + SSE backend, timeline UI, Docker Compose |
+
+## What works now (M5)
+
+### Crash + resume
+
+- **`list_running_runs(db_path)`** (`src/waypoint/events.py`) — SQL `EXCEPT` query returns `(run_id, workflow_name)` for runs that have `RUN_STARTED` but no `RUN_FINISHED` or `RUN_FAILED`.
+- **`get_run_start_payload(db_path, run_id)`** — retrieves the original prompt and workflow name from the `RUN_STARTED` event.
+- **Idempotent `WorkflowRunner.run()`** — on startup, reads existing events once; if `RUN_STARTED` already exists, skips the append and resumes from `_resume_state()` instead of restarting.
+- **`_resume_state()`** — scans the event log for the last `HANDOFF_COMMITTED` to determine which agent to resume; falls back to `entry_point` + original prompt if none found.
+- **Skip finished agents** — agents with an `AGENT_STEP_FINISHED` event in the log are not re-entered; their committed handoff is replayed to advance to the next agent.
+- **`resume_runs(db_path, workflows, client)`** — top-level async function; calls `list_running_runs`, looks up each workflow by name, calls `WorkflowRunner.run()` for each. Silently skips unknown workflow names.
+- **`waypoint serve`** (`src/waypoint/cli.py`) — migrates DB, reports interrupted runs, calls `resume_runs`. Supports `--kill-after N` (seconds) for crash-resume testing; uses `SIGKILL` on Unix, `SIGTERM` on Windows.
+- **Tests** (`tests/test_crash_resume.py`) — `test_list_running_runs_excludes_finished` seeds three runs and verifies only the interrupted one is returned; `test_resume_completes_with_exactly_once_tool_execution` pre-seeds a mid-crash DB (tool already committed), resumes, and asserts the tool fn is not called again and `RUN_FINISHED` is written.
 
 ## What works now (M4)
 
