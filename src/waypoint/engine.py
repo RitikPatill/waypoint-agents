@@ -21,17 +21,28 @@ class ReplayState:
     committed_llm_responses: list[dict] = field(default_factory=list)
     # tool_use_id -> result string
     committed_tool_results: dict[str, str] = field(default_factory=dict)
+    committed_handoff: dict | None = None
     status: str = "running"  # "running" | "finished" | "failed"
 
 
-def replay(db_path: str, run_id: str) -> ReplayState:
-    """Pure fold over the event log — no side effects."""
+def replay(db_path: str, run_id: str, agent_name: str | None = None) -> ReplayState:
+    """Pure fold over the event log — no side effects.
+
+    If agent_name is provided, only events for that agent (or events with no
+    agent) are considered — this prevents a Planner's committed LLM responses
+    from bleeding into the Researcher's cursor in multi-agent runs.
+    """
     state = ReplayState(run_id=run_id)
     for event in list_events(db_path, run_id):
+        # Skip events that belong to a different agent
+        if agent_name is not None and event.agent is not None and event.agent != agent_name:
+            continue
         if event.type == EventType.LLM_CALL_COMMITTED:
             state.committed_llm_responses.append(event.payload)
         elif event.type == EventType.TOOL_CALL_COMMITTED:
             state.committed_tool_results[event.payload["tool_use_id"]] = event.payload["result"]
+        elif event.type == EventType.HANDOFF_COMMITTED:
+            state.committed_handoff = event.payload
         elif event.type == EventType.RUN_FINISHED:
             state.status = "finished"
         elif event.type == EventType.RUN_FAILED:
@@ -72,8 +83,15 @@ class DurableRunner:
         client: "anthropic.AsyncAnthropic",
     ) -> "AgentResult":
         from waypoint.agent import AgentResult
+        from waypoint.workflow import Handoff, HandoffSignal  # local to avoid circular
 
-        state = replay(self.db_path, run_id)
+        state = replay(self.db_path, run_id, agent_name=agent.name)
+
+        # If a handoff was already committed for this agent (replay path), skip re-running
+        if state.committed_handoff is not None:
+            h = state.committed_handoff
+            return AgentResult(output="", messages=[], handoff=Handoff(h["target"], h["payload"]))
+
         llm_cursor = 0
 
         messages: list = [{"role": "user", "content": prompt}]
@@ -172,7 +190,25 @@ class DurableRunner:
                                 },
                             ),
                         )
-                        result_str = str(await tool.dispatch(**tool_input))
+                        try:
+                            result_str = str(await tool.dispatch(**tool_input))
+                        except HandoffSignal as hs:
+                            # Commit handoff event (guard against double-commit on replay)
+                            if state.committed_handoff is None:
+                                append(
+                                    self.db_path,
+                                    Event(
+                                        run_id=run_id,
+                                        type=EventType.HANDOFF_COMMITTED,
+                                        agent=agent.name,
+                                        payload={"target": hs.target, "payload": hs.payload},
+                                    ),
+                                )
+                            return AgentResult(
+                                output="",
+                                messages=messages,
+                                handoff=Handoff(hs.target, hs.payload),
+                            )
                         append(
                             self.db_path,
                             Event(

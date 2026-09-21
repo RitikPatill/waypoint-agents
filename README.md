@@ -43,7 +43,7 @@ flowchart LR
     Replay --> EventLog
 ```
 
-**Event types:** `RUN_STARTED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
+**Event types:** `RUN_STARTED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `HANDOFF_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
 
 **The invariant:** no side effect happens without a preceding committed event, and no event is committed until its side effect has succeeded and been persisted with its result. Replay is a pure fold over the log.
 
@@ -56,8 +56,8 @@ uv sync
 cp .env.example .env
 # edit .env — set ANTHROPIC_API_KEY
 uv run waypoint --version   # works now
-uv run pytest               # all tests pass without an API key (M3)
-uv run waypoint serve       # available in M4
+uv run pytest               # all tests pass without an API key
+uv run python examples/research_team.py  # requires ANTHROPIC_API_KEY
 ```
 
 ### With Docker
@@ -77,14 +77,15 @@ src/waypoint/       # core library
   builtin_tools.py  # fetch_url, sum_numbers
   engine.py         # durable execution engine  (M3+)
   events.py         # event log (SQLite)         (M3+)
-  api.py            # FastAPI + SSE              (M4+)
+  workflow.py       # Workflow + WorkflowRunner  (M4+)
+  api.py            # FastAPI + SSE              (planned)
 tests/
   test_version.py   # CLI smoke test
   test_agent.py     # agent loop tests (mocked client)
   test_engine.py    # durable engine scenarios   (M3+)
+  test_workflow.py  # multi-agent workflow tests (M4+)
 examples/
-  research_team/    # Planner → Researcher       (M4+)
-  code_reviewer/    # Reader → Critic → Summary  (M4+)
+  research_team.py  # Planner → Researcher       (M4+)
 docs/
 ```
 
@@ -95,15 +96,23 @@ docs/
 | M1 | ✅ done | Scaffold, README, CLI stub, CI wiring |
 | M2 | ✅ done | Agent core: Tool primitive, tool-use loop, builtin tools |
 | M3 | ✅ done | Event-sourced durable engine: SQLite event log, write-ahead pattern, replay + resume |
-| M4 | planned | FastAPI + SSE backend, timeline UI |
-| M5 | planned | Example workflows, Docker Compose |
+| M4 | ✅ done | Multi-agent workflows + handoffs: `Workflow`, `WorkflowRunner`, `HANDOFF_COMMITTED` event, `research_team` example |
+| M5 | planned | FastAPI + SSE backend, timeline UI, Docker Compose |
 
-## What works now (M3)
+## What works now (M4)
 
-### Durable engine
+### Multi-agent workflows + handoffs
 
-- **`events.py`** (`src/waypoint/events.py`) — SQLite-backed event log with WAL mode; `migrate()` sets up the schema, `append()` writes a single event, `list_events()` reads in order. Event types: `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `AGENT_STEP_FINISHED`, and more.
-- **`replay(db_path, run_id)`** — pure fold over the event log; returns a `ReplayState` with all committed LLM responses and tool results. No side effects.
+- **`workflow.py`** (`src/waypoint/workflow.py`) — `Workflow` (named dict of `Agent` nodes + entry point), `WorkflowRunner` (executes agents in sequence, routing via `handoff`), `HandoffSignal` (exception raised by the injected `handoff` tool), `Handoff` (target + payload dataclass).
+- **`handoff` tool injection** — `WorkflowRunner` injects a `handoff` tool into each agent listing all other agent names as valid targets. The tool raises `HandoffSignal`; the engine catches it, commits a `HANDOFF_COMMITTED` event, and returns an `AgentResult` with a `handoff` field.
+- **Agent-scoped replay** — `replay(db_path, run_id, agent_name=...)` filters events by agent, preventing a Planner's committed LLM responses from bleeding into the Researcher's cursor on resume.
+- **`research_team` example** (`examples/research_team.py`) — Planner → Researcher with `fetch_url`; run with `uv run python examples/research_team.py` after setting `ANTHROPIC_API_KEY`.
+- **Tests** (`tests/test_workflow.py`) — two scenarios with mocked client: handoff event ordering asserted end-to-end; pre-seeded planner log verified to skip live LLM call on resume with no duplicate `HANDOFF_COMMITTED`.
+
+### M3 (still works)
+
+- **`events.py`** (`src/waypoint/events.py`) — SQLite-backed event log with WAL mode; `migrate()` sets up the schema, `append()` writes a single event, `list_events()` reads in order.
+- **`replay(db_path, run_id)`** — pure fold over the event log; returns a `ReplayState` with committed LLM responses, tool results, and handoff. No side effects.
 - **`DurableRunner`** (`src/waypoint/engine.py`) — write-ahead agent loop: appends `*_STARTED` before the side effect, `*_COMMITTED` after. On startup it replays the log and skips already-completed steps — no duplicate LLM charges, no double tool execution.
 - **Idempotency key** — `Tool.idempotency_key: str | None` stored in `TOOL_CALL_STARTED` events for future deduplication.
 - **Tests** (`tests/test_engine.py`) — five scenarios with mocked client and temp SQLite: replay empty, happy path event ordering, crash between LLM writes, tool result replayed from log, crash between tool writes triggers re-execution.
@@ -120,7 +129,7 @@ docs/
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-`api.py`, example workflows, and the timeline UI are planned — see the milestone table.
+The FastAPI + SSE backend and timeline UI are planned — see the milestone table.
 
 ## Contributing
 
