@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import anthropic
 
 from waypoint.tools import Tool, ToolResult
+
+if TYPE_CHECKING:
+    from waypoint.workflow import Handoff
 
 
 @dataclass
 class AgentResult:
     output: str
     messages: list
+    handoff: "Handoff | None" = None
 
 
 @dataclass
