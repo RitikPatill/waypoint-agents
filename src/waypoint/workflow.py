@@ -9,7 +9,14 @@ import anthropic
 
 from waypoint.agent import Agent
 from waypoint.engine import DurableRunner
-from waypoint.events import Event, EventType, append
+from waypoint.events import (
+    Event,
+    EventType,
+    append,
+    get_run_start_payload,
+    list_events,
+    list_running_runs,
+)
 from waypoint.tools import Tool
 
 if TYPE_CHECKING:
@@ -85,6 +92,32 @@ class WorkflowRunner:
         self.runner = DurableRunner(db_path)
         self.db_path = db_path
 
+    def _resume_state(
+        self,
+        run_id: str,
+        workflow: Workflow,
+        events: list[Event],
+    ) -> tuple[str, str]:
+        """Return (agent_name, prompt) to resume from.
+
+        Scans for the last HANDOFF_COMMITTED; if none, returns
+        (workflow.entry_point, original_prompt_from_RUN_STARTED).
+        """
+        original_prompt = ""
+        last_handoff_target: str | None = None
+        last_handoff_payload: str | None = None
+
+        for event in events:
+            if event.type == EventType.RUN_STARTED:
+                original_prompt = event.payload.get("prompt", "")
+            elif event.type == EventType.HANDOFF_COMMITTED:
+                last_handoff_target = event.payload.get("target")
+                last_handoff_payload = event.payload.get("payload", "")
+
+        if last_handoff_target is not None:
+            return last_handoff_target, last_handoff_payload or ""
+        return workflow.entry_point, original_prompt
+
     async def run(
         self,
         run_id: str,
@@ -92,24 +125,58 @@ class WorkflowRunner:
         prompt: str,
         client: anthropic.AsyncAnthropic,
     ) -> str:
-        append(self.db_path, Event(
-            run_id=run_id,
-            type=EventType.RUN_STARTED,
-            payload={"workflow": workflow.name, "prompt": prompt},
-        ))
+        # Load existing events once; reuse for both guard and resume-state inference
+        existing_events = list_events(self.db_path, run_id)
+        is_resuming = any(e.type == EventType.RUN_STARTED for e in existing_events)
 
-        current_agent_name = workflow.entry_point
-        current_prompt = prompt
+        if not is_resuming:
+            append(self.db_path, Event(
+                run_id=run_id,
+                type=EventType.RUN_STARTED,
+                payload={"workflow_name": workflow.name, "prompt": prompt},
+            ))
+        else:
+            # Resuming: infer the correct entry point and prompt from the log
+            current_agent_name, current_prompt = self._resume_state(run_id, workflow, existing_events)
+
+        if not is_resuming:
+            current_agent_name = workflow.entry_point
+            current_prompt = prompt
+
+        # Build set of agents whose AGENT_STEP_FINISHED already exists
+        finished_agents: set[str] = set()
+        for event in existing_events:
+            if event.type == EventType.AGENT_STEP_FINISHED and event.agent:
+                finished_agents.add(event.agent)
+
         final_output = ""
 
         while True:
             agent = workflow.agents[current_agent_name]
 
+            # Skip agents that already completed in a previous run
+            if current_agent_name in finished_agents:
+                # Find the handoff that was committed for this agent, if any
+                for event in existing_events:
+                    if (
+                        event.type == EventType.HANDOFF_COMMITTED
+                        and event.agent == current_agent_name
+                    ):
+                        current_agent_name = event.payload["target"]
+                        current_prompt = event.payload["payload"]
+                        break
+                else:
+                    # Agent finished without handoff — run is already done
+                    for event in reversed(existing_events):
+                        if event.type == EventType.RUN_FINISHED:
+                            return event.payload.get("output", "")
+                    break
+                continue
+
             # Inject handoff tool for agents that have valid targets
             other_agents = [n for n in workflow.agents if n != current_agent_name]
             if other_agents:
                 handoff_tool = make_handoff_tool(other_agents)
-                # Shallow copy — do NOT mutate the original agent
                 agent = dataclasses.replace(agent, tools=[*agent.tools, handoff_tool])
 
             append(self.db_path, Event(
@@ -140,3 +207,29 @@ class WorkflowRunner:
         ))
 
         return final_output
+
+
+async def resume_runs(
+    db_path: str,
+    workflows: dict[str, Workflow],
+    client: anthropic.AsyncAnthropic,
+) -> list[str]:
+    """Find all in-flight runs, resume each one.
+
+    Returns list of run_ids that were resumed.
+    Silently skips run_ids whose workflow_name is not in `workflows`.
+    """
+    running = list_running_runs(db_path)
+    resumed: list[str] = []
+
+    for run_id, workflow_name in running:
+        workflow = workflows.get(workflow_name)
+        if workflow is None:
+            continue
+        start_payload = get_run_start_payload(db_path, run_id)
+        prompt = start_payload.get("prompt", "")
+        runner = WorkflowRunner(db_path)
+        await runner.run(run_id, workflow, prompt, client)
+        resumed.append(run_id)
+
+    return resumed

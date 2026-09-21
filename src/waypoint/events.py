@@ -102,3 +102,46 @@ def list_events(db_path: str, run_id: str) -> list[Event]:
             )
         )
     return result
+
+
+def list_running_runs(db_path: str) -> list[tuple[str, str]]:
+    """Return (run_id, workflow_name) for runs that started but never finished."""
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        rows = con.execute("""
+            SELECT run_id, payload
+            FROM events
+            WHERE type = 'RUN_STARTED'
+            AND run_id NOT IN (
+                SELECT run_id FROM events WHERE type = 'RUN_FINISHED'
+                UNION
+                SELECT run_id FROM events WHERE type = 'RUN_FAILED'
+            )
+        """).fetchall()
+    finally:
+        con.close()
+
+    result = []
+    for run_id, payload_str in rows:
+        payload = json.loads(payload_str)
+        workflow_name = payload.get("workflow_name", payload.get("workflow", ""))
+        result.append((run_id, workflow_name))
+    return result
+
+
+def get_run_start_payload(db_path: str, run_id: str) -> dict:
+    """Return the payload of the RUN_STARTED event for a run."""
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        row = con.execute(
+            "SELECT payload FROM events WHERE run_id = ? AND type = 'RUN_STARTED' LIMIT 1",
+            (run_id,),
+        ).fetchone()
+    finally:
+        con.close()
+
+    if row is None:
+        return {}
+    return json.loads(row[0])
