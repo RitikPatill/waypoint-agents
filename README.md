@@ -11,15 +11,24 @@ cp .env.example .env   # add your ANTHROPIC_API_KEY
 uv run waypoint serve  # or: docker compose up
 ```
 
-Open `http://localhost:8000`.
+Open `http://localhost:8000`. Two workflows are selectable from the dropdown.
 
-1. Click **Run: Research Team** — query: *"State of MCP servers in 2026"*
+**Crash-resume demo (research_team)**
+
+1. Select **research_team** — prompt: *"State of MCP servers in 2026"*
 2. Watch the timeline light up: Planner thinks → emits plan → hands off to Researcher
 3. Researcher starts calling `fetch_url` — three URL cards stream in live
 4. Click the red **Kill Worker** button mid-run — process dies
 5. Run `uv run waypoint serve` again — timeline reconnects
 6. Waypoint replays the event log, notices the Researcher was mid-loop, resumes from the last committed tool call, finishes cleanly
 7. Final summary appears; the timeline shows a **"resumed here"** marker
+
+**Static code review demo (code_reviewer)**
+
+1. Select **code_reviewer** — prompt: `examples/fixtures/buggy_sample.py`
+2. Reader agent reads the file via the allowlisted `read_file` tool
+3. Critic identifies bugs with line references, hands off to Summarizer
+4. Summarizer produces a P1/P2/P3 action list; all three swimlanes fill in sequence
 
 ## Why durable matters
 
@@ -59,6 +68,7 @@ uv run waypoint --version   # works now
 uv run pytest               # all tests pass without an API key
 uv run waypoint serve       # resume any interrupted runs
 uv run python examples/research_team.py  # requires ANTHROPIC_API_KEY
+uv run python examples/code_reviewer.py  # reviews examples/fixtures/buggy_sample.py
 ```
 
 ### With Docker
@@ -75,7 +85,7 @@ src/waypoint/       # core library
   cli.py            # typer CLI entry point
   tools.py          # Tool + ToolResult primitives
   agent.py          # Agent: Anthropic tool-use loop
-  builtin_tools.py  # fetch_url, sum_numbers
+  builtin_tools.py  # fetch_url, sum_numbers, make_read_file_tool
   engine.py         # durable execution engine  (M3+)
   events.py         # event log (SQLite)         (M3+)
   workflow.py       # Workflow + WorkflowRunner  (M4+)
@@ -92,8 +102,12 @@ tests/
   test_crash_resume.py   # crash + resume integration    (M5+)
   test_api.py            # FastAPI + SSE tests           (M6+)
   test_ui.py             # timeline UI + RUN_RESUMED     (M7+)
+  test_code_reviewer.py  # read_file tool + registry     (M8+)
 examples/
-  research_team.py  # Planner → Researcher       (M4+)
+  research_team.py       # Planner → Researcher         (M4+)
+  code_reviewer.py       # Reader → Critic → Summarizer (M8+)
+  fixtures/
+    buggy_sample.py      # intentional-bug fixture for code_reviewer demo
 docs/
 ```
 
@@ -108,6 +122,28 @@ docs/
 | M5 | ✅ done | Crash + resume: `waypoint serve` replays interrupted runs; `--kill-after N` flag; exactly-once tool execution verified by integration test |
 | M6 | ✅ done | FastAPI + SSE backend: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` SSE stream, `POST /debug/kill-worker` crash button |
 | M7 | ✅ done | Timeline UI: Alpine.js + Pico.css SPA; live SSE event cards, per-agent swimlanes, "resumed here" marker, Kill Worker button |
+| M8 | ✅ done | Code reviewer workflow: Reader → Critic → Summarizer; `read_file` tool with allowlist; `examples/fixtures/buggy_sample.py` deterministic demo fixture |
+
+## What works now (M8)
+
+### Code reviewer workflow
+
+- **`make_read_file_tool(allowed_dirs)`** (`src/waypoint/builtin_tools.py`) — factory function returning a `read_file` Tool; resolves paths with `.resolve()`, rejects traversal outside `allowed_dirs` with a structured error string (never raises), truncates files at 8 000 chars.
+- **`code_reviewer` workflow** (`src/waypoint/workflows.py`) — three-agent pipeline: Reader (reads the file and hands off source code to Critic), Critic (identifies bugs/smells with line references, hands off critique to Summarizer), Summarizer (distils a P1/P2/P3 action list).
+- **`examples/fixtures/buggy_sample.py`** — ~60-line deterministic fixture with six intentional bugs: mutable default argument, off-by-one, unhandled division by zero, shadowed built-in, missing return value, bare `except`.
+- **`examples/code_reviewer.py`** — standalone runner mirroring `research_team.py`; defaults to the fixture path; accepts an optional CLI arg for a custom file.
+- **`BUILTIN_WORKFLOWS`** now includes `"code_reviewer"`, surfacing it in the UI dropdown automatically.
+- **Tests** (`tests/test_code_reviewer.py`) — three scenarios: allowed read returns content, blocked path returns error string without raising, registry contains correct structure.
+
+#### Demo
+
+```bash
+uv run waypoint serve
+# open http://localhost:8000, select "code_reviewer", type: examples/fixtures/buggy_sample.py
+
+# or run headlessly:
+uv run python examples/code_reviewer.py
+```
 
 ## What works now (M7)
 
@@ -181,7 +217,7 @@ docs/
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-The timeline UI is live — open `http://localhost:8000` after `uv run waypoint serve`.
+The timeline UI is live — open `http://localhost:8000` after `uv run waypoint serve`. Two workflows are available: **research_team** and **code_reviewer**.
 
 ## Contributing
 
