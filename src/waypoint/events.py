@@ -20,6 +20,7 @@ class EventType(str, Enum):
     AGENT_STEP_FINISHED = "AGENT_STEP_FINISHED"
     RUN_FINISHED = "RUN_FINISHED"
     RUN_FAILED = "RUN_FAILED"
+    RUN_RESUMED = "RUN_RESUMED"
 
 
 @dataclass

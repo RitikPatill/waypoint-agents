@@ -33,7 +33,7 @@ Open `http://localhost:8000`.
 
 ```mermaid
 flowchart LR
-    UI[Timeline UI<br/>HTMX + SSE] <-->|events| API[FastAPI]
+    UI[Timeline UI<br/>Alpine.js + SSE] <-->|events| API[FastAPI]
     API --> Engine[Durable Engine]
     Engine --> EventLog[(SQLite<br/>event log)]
     Engine --> Runner[Agent Runner]
@@ -43,7 +43,7 @@ flowchart LR
     Replay --> EventLog
 ```
 
-**Event types:** `RUN_STARTED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `HANDOFF_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
+**Event types:** `RUN_STARTED`, `RUN_RESUMED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `HANDOFF_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
 
 **The invariant:** no side effect happens without a preceding committed event, and no event is committed until its side effect has succeeded and been persisted with its result. Replay is a pure fold over the log.
 
@@ -82,6 +82,8 @@ src/waypoint/       # core library
   api.py            # FastAPI + SSE              (M6+)
   pubsub.py         # in-process event bus      (M6+)
   workflows.py      # built-in workflow registry (M6+)
+  static/
+    index.html      # timeline SPA (Alpine.js)  (M7+)
 tests/
   test_version.py        # CLI smoke test
   test_agent.py          # agent loop tests (mocked client)
@@ -89,6 +91,7 @@ tests/
   test_workflow.py       # multi-agent workflow tests    (M4+)
   test_crash_resume.py   # crash + resume integration    (M5+)
   test_api.py            # FastAPI + SSE tests           (M6+)
+  test_ui.py             # timeline UI + RUN_RESUMED     (M7+)
 examples/
   research_team.py  # Planner → Researcher       (M4+)
 docs/
@@ -104,7 +107,21 @@ docs/
 | M4 | ✅ done | Multi-agent workflows + handoffs: `Workflow`, `WorkflowRunner`, `HANDOFF_COMMITTED` event, `research_team` example |
 | M5 | ✅ done | Crash + resume: `waypoint serve` replays interrupted runs; `--kill-after N` flag; exactly-once tool execution verified by integration test |
 | M6 | ✅ done | FastAPI + SSE backend: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` SSE stream, `POST /debug/kill-worker` crash button |
-| M7 | planned | Timeline UI: HTMX + SSE frontend; live event cards, agent swimlanes, "resumed here" marker, Kill Worker button |
+| M7 | ✅ done | Timeline UI: Alpine.js + Pico.css SPA; live SSE event cards, per-agent swimlanes, "resumed here" marker, Kill Worker button |
+
+## What works now (M7)
+
+### Live timeline UI
+
+- **`GET /`** — serves `src/waypoint/static/index.html` (Alpine.js + Pico.css classless, no bundler)
+- **`GET /workflows`** — returns `{"workflows": [...]}` for the run form dropdown
+- **`RUN_RESUMED` event** — emitted once when `WorkflowRunner.run()` detects an interrupted run; streams to any connected SSE client
+- **Timeline layout** — per-agent swimlanes rendered as flexbox columns; events appear as `<details>` cards with click-to-expand JSON payload
+- **Status pill** — reflects `idle / running / resumed / finished / failed / crashed` derived from received events
+- **"Resumed here" marker** — dashed horizontal divider injected into every swimlane at the timestamp of the `RUN_RESUMED` event
+- **Kill Worker button** — visible only when `status === 'running'`; POSTs to `/debug/kill-worker` and sets status to `'crashed'` optimistically
+- **SSE reconnect safety** — `EventSource` auto-reconnects; the SSE endpoint replays full history on reconnect; `events` array is cleared on new run start
+- **Tests** (`tests/test_ui.py`) — four scenarios: `GET /` returns HTML with expected content, `GET /workflows` returns workflow list, `RUN_RESUMED` enum value, `RUN_RESUMED` emitted on resume
 
 ## What works now (M6)
 
@@ -164,7 +181,7 @@ docs/
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-The timeline UI is planned — see the milestone table.
+The timeline UI is live — open `http://localhost:8000` after `uv run waypoint serve`.
 
 ## Contributing
 
