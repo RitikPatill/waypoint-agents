@@ -7,11 +7,12 @@ import os
 import signal
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import anthropic
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from waypoint.events import Event, EventType, list_events, migrate
@@ -70,6 +71,15 @@ def create_app(
             await runner.run(run_id, workflow, prompt, client)
         finally:
             bus.close_run(run_id)
+
+    @app.get("/")
+    async def index():
+        html = (Path(__file__).parent / "static" / "index.html").read_text()
+        return HTMLResponse(html)
+
+    @app.get("/workflows")
+    async def list_workflows():
+        return {"workflows": list(BUILTIN_WORKFLOWS.keys())}
 
     @app.post("/runs", status_code=202)
     async def create_run(req: RunRequest):

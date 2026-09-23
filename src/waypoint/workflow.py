@@ -144,13 +144,16 @@ class WorkflowRunner:
                 type=EventType.RUN_STARTED,
                 payload={"workflow_name": workflow.name, "prompt": prompt},
             ))
+            current_agent_name = workflow.entry_point
+            current_prompt = prompt
         else:
             # Resuming: infer the correct entry point and prompt from the log
             current_agent_name, current_prompt = self._resume_state(run_id, workflow, existing_events)
-
-        if not is_resuming:
-            current_agent_name = workflow.entry_point
-            current_prompt = prompt
+            self._emit(Event(
+                run_id=run_id,
+                type=EventType.RUN_RESUMED,
+                payload={},
+            ))
 
         # Build set of agents whose AGENT_STEP_FINISHED already exists
         finished_agents: set[str] = set()

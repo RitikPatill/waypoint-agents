@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Waypoint</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <style>
+    :root { --pico-font-size: 15px; }
+    header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 1rem 0; }
+    header h1 { margin: 0; flex: 1; }
+    [data-status="idle"]     { background: var(--pico-secondary-background); color: var(--pico-secondary); }
+    [data-status="running"]  { background: #1a6fb533; color: #1a6fb5; }
+    [data-status="finished"] { background: #1a8f3933; color: #1a8f39; }
+    [data-status="failed"]   { background: #c0392b33; color: #c0392b; }
+    [data-status="crashed"]  { background: #e67e2233; color: #e67e22; }
+    [data-status="resumed"]  { background: #8e44ad33; color: #8e44ad; }
+    .status-pill {
+      display: inline-block;
+      padding: .2rem .65rem;
+      border-radius: 999px;
+      font-size: .75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .run-form { display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap; }
+    .run-form label { flex: 0 0 auto; margin: 0; }
+    .run-form select, .run-form textarea { margin: 0; }
+    .run-form textarea { flex: 1 1 280px; min-height: 2.4rem; resize: vertical; }
+    .timeline {
+      display: flex;
+      gap: 1rem;
+      overflow-x: auto;
+      align-items: flex-start;
+      padding-bottom: 1rem;
+      margin-top: 1.5rem;
+    }
+    .lane {
+      flex: 0 0 300px;
+      min-height: 4rem;
+    }
+    .lane-header {
+      font-weight: 700;
+      font-size: .85rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      padding: .3rem .5rem;
+      border-radius: 4px;
+      margin-bottom: .5rem;
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--pico-muted-border-color);
+    }
+    .resume-marker {
+      border-top: 2px dashed var(--pico-primary);
+      text-align: center;
+      font-size: .75rem;
+      margin: .5rem 0;
+      color: var(--pico-primary);
+      padding-top: .3rem;
+    }
+    details.event-card {
+      margin-bottom: .4rem;
+      border: 1px solid var(--pico-muted-border-color);
+      border-radius: 6px;
+      background: var(--pico-card-background-color);
+      overflow: hidden;
+    }
+    details.event-card summary {
+      cursor: pointer;
+      padding: .4rem .6rem;
+      font-size: .8rem;
+      list-style: none;
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+    }
+    details.event-card summary::-webkit-details-marker { display: none; }
+    details.event-card summary::before {
+      content: "▶";
+      font-size: .6rem;
+      transition: transform .15s;
+      flex-shrink: 0;
+    }
+    details.event-card[open] summary::before { transform: rotate(90deg); }
+    .event-type {
+      font-size: .7rem;
+      font-weight: 700;
+      padding: .1rem .35rem;
+      border-radius: 3px;
+      background: var(--pico-primary);
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .event-ts { color: var(--pico-muted-color); font-size: .7rem; margin-left: auto; flex-shrink: 0; }
+    details.event-card pre {
+      margin: 0;
+      padding: .5rem .75rem;
+      font-size: .72rem;
+      overflow-x: auto;
+      background: var(--pico-code-background-color, #f6f8fa);
+      border-top: 1px solid var(--pico-muted-border-color);
+      max-height: 300px;
+    }
+    .empty-state { color: var(--pico-muted-color); font-size: .9rem; padding: 2rem 0; text-align: center; }
+    button.danger { --pico-background-color: #c0392b; --pico-border-color: #a93226; }
+    button.danger:hover { --pico-background-color: #a93226; }
+  </style>
+</head>
+<body x-data="waypoint()" x-init="init()">
+
+<header>
+  <h1>Waypoint</h1>
+  <span class="status-pill" :data-status="status" x-text="status"></span>
+  <button
+    class="danger"
+    x-show="status === 'running'"
+    @click="killWorker()"
+    style="margin:0"
+  >Kill Worker</button>
+</header>
+
+<section>
+  <div class="run-form">
+    <label>
+      Workflow
+      <select x-model="workflow">
+        <template x-for="wf in workflows" :key="wf">
+          <option :value="wf" x-text="wf"></option>
+        </template>
+      </select>
+    </label>
+    <textarea x-model="prompt" placeholder="Enter prompt…" rows="1"></textarea>
+    <button @click="startRun()" :disabled="status === 'running' || !workflow">Run</button>
+  </div>
+</section>
+
+<main>
+  <div class="timeline" x-show="agents.length > 0">
+    <template x-for="agentName in agents" :key="agentName">
+      <div class="lane">
+        <div class="lane-header" x-text="agentName"></div>
+        <template x-for="item in eventsForAgent(agentName)" :key="item._key">
+          <!-- Resume marker -->
+          <template x-if="item.type === '__resume__'">
+            <div class="resume-marker">&#9650; Resumed here</div>
+          </template>
+          <!-- Event card -->
+          <template x-if="item.type !== '__resume__'">
+            <details class="event-card">
+              <summary>
+                <span class="event-type" x-text="item.type.replace('_', ' ')"></span>
+                <span x-text="item.payload && item.payload.tool_name ? item.payload.tool_name : ''"></span>
+                <span class="event-ts" x-text="new Date(item.ts * 1000).toLocaleTimeString()"></span>
+              </summary>
+              <pre x-text="JSON.stringify(item.payload, null, 2)"></pre>
+            </details>
+          </template>
+        </template>
+      </div>
+    </template>
+  </div>
+  <p class="empty-state" x-show="agents.length === 0">No events yet. Start a run above.</p>
+</main>
+
+<script>
+function waypoint() {
+  return {
+    workflows: [],
+    workflow: '',
+    prompt: '',
+    runId: null,
+    status: 'idle',
+    events: [],
+    resumed: false,
+    resumedTs: null,
+    es: null,
+
+    get agents() {
+      const seen = new Set();
+      const order = [];
+      for (const e of this.events) {
+        if (e.agent && !seen.has(e.agent)) {
+          seen.add(e.agent);
+          order.push(e.agent);
+        }
+      }
+      return order;
+    },
+
+    eventsForAgent(name) {
+      const items = [];
+      let resumeInserted = false;
+      for (const e of this.events) {
+        if (this.resumed && !resumeInserted && e.ts >= this.resumedTs) {
+          items.push({ type: '__resume__', _key: '__resume__' });
+          resumeInserted = true;
+        }
+        if (e.agent === name) {
+          items.push({ ...e, _key: String(e.id ?? e.ts) });
+        }
+      }
+      return items;
+    },
+
+    async init() {
+      try {
+        const res = await fetch('/workflows');
+        const data = await res.json();
+        this.workflows = data.workflows || [];
+        if (this.workflows.length) this.workflow = this.workflows[0];
+      } catch (err) {
+        console.error('Failed to load workflows', err);
+      }
+    },
+
+    async startRun() {
+      this.events = [];
+      this.resumed = false;
+      this.resumedTs = null;
+      this.status = 'running';
+      if (this.es) { this.es.close(); this.es = null; }
+
+      try {
+        const res = await fetch('/runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workflow: this.workflow, prompt: this.prompt }),
+        });
+        if (!res.ok) {
+          this.status = 'failed';
+          return;
+        }
+        const data = await res.json();
+        this.runId = data.run_id;
+        this.connectSSE(this.runId);
+      } catch (err) {
+        console.error('Failed to start run', err);
+        this.status = 'failed';
+      }
+    },
+
+    connectSSE(runId) {
+      const url = `/runs/${runId}/events`;
+      const es = new EventSource(url);
+      this.es = es;
+
+      es.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          this.handleEvent(evt);
+        } catch (err) {
+          console.error('SSE parse error', err);
+        }
+      };
+
+      es.onerror = () => {
+        if (this.status === 'running') {
+          this.status = 'crashed';
+        }
+        es.close();
+        this.es = null;
+      };
+    },
+
+    handleEvent(evt) {
+      this.events.push(evt);
+
+      if (evt.type === 'RUN_RESUMED') {
+        this.resumed = true;
+        this.resumedTs = evt.ts;
+        this.status = 'resumed';
+      } else if (evt.type === 'RUN_FINISHED') {
+        this.status = 'finished';
+        if (this.es) { this.es.close(); this.es = null; }
+      } else if (evt.type === 'RUN_FAILED') {
+        this.status = 'failed';
+        if (this.es) { this.es.close(); this.es = null; }
+      } else if (evt.type === 'RUN_STARTED' && this.status !== 'resumed') {
+        this.status = 'running';
+      }
+    },
+
+    async killWorker() {
+      this.status = 'crashed';
+      try {
+        await fetch('/debug/kill-worker', { method: 'POST' });
+      } catch (_) {
+        // server dies — connection reset is expected
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>
