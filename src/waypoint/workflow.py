@@ -20,7 +20,7 @@ from waypoint.events import (
 from waypoint.tools import Tool
 
 if TYPE_CHECKING:
-    pass
+    from waypoint.pubsub import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +88,18 @@ class Workflow:
 # ---------------------------------------------------------------------------
 
 class WorkflowRunner:
-    def __init__(self, db_path: str) -> None:
-        self.runner = DurableRunner(db_path)
+    def __init__(self, db_path: str, event_bus: "EventBus | None" = None) -> None:
+        self.runner = DurableRunner(db_path, event_bus=event_bus)
         self.db_path = db_path
+        self.event_bus = event_bus
+
+    def _emit(self, event: Event) -> int:
+        from waypoint.events import append as _append
+        eid = _append(self.db_path, event)
+        if self.event_bus is not None:
+            event.id = eid
+            self.event_bus.publish(event)
+        return eid
 
     def _resume_state(
         self,
@@ -130,7 +139,7 @@ class WorkflowRunner:
         is_resuming = any(e.type == EventType.RUN_STARTED for e in existing_events)
 
         if not is_resuming:
-            append(self.db_path, Event(
+            self._emit(Event(
                 run_id=run_id,
                 type=EventType.RUN_STARTED,
                 payload={"workflow_name": workflow.name, "prompt": prompt},
@@ -179,7 +188,7 @@ class WorkflowRunner:
                 handoff_tool = make_handoff_tool(other_agents)
                 agent = dataclasses.replace(agent, tools=[*agent.tools, handoff_tool])
 
-            append(self.db_path, Event(
+            self._emit(Event(
                 run_id=run_id,
                 type=EventType.AGENT_STEP_STARTED,
                 agent=current_agent_name,
@@ -200,7 +209,7 @@ class WorkflowRunner:
                 final_output = result.output
                 break
 
-        append(self.db_path, Event(
+        self._emit(Event(
             run_id=run_id,
             type=EventType.RUN_FINISHED,
             payload={"output": final_output},
@@ -213,6 +222,7 @@ async def resume_runs(
     db_path: str,
     workflows: dict[str, Workflow],
     client: anthropic.AsyncAnthropic,
+    event_bus: "EventBus | None" = None,
 ) -> list[str]:
     """Find all in-flight runs, resume each one.
 
@@ -228,7 +238,7 @@ async def resume_runs(
             continue
         start_payload = get_run_start_payload(db_path, run_id)
         prompt = start_payload.get("prompt", "")
-        runner = WorkflowRunner(db_path)
+        runner = WorkflowRunner(db_path, event_bus=event_bus)
         await runner.run(run_id, workflow, prompt, client)
         resumed.append(run_id)
 
