@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     import anthropic
 
     from waypoint.agent import Agent, AgentResult
+    from waypoint.pubsub import EventBus
 
 
 @dataclass
@@ -71,9 +72,17 @@ def _payload_to_blocks(payload_blocks: list[dict]) -> list:
 
 
 class DurableRunner:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, event_bus: "EventBus | None" = None) -> None:
         self.db_path = db_path
+        self.event_bus = event_bus
         migrate(db_path)
+
+    def _emit(self, event: Event) -> int:
+        eid = append(self.db_path, event)
+        if self.event_bus is not None:
+            event.id = eid
+            self.event_bus.publish(event)
+        return eid
 
     async def run_agent(
         self,
@@ -106,14 +115,13 @@ class DurableRunner:
                 stop_reason = stored.get("stop_reason", "end_turn")
             else:
                 # Live: write-ahead then call API
-                append(
-                    self.db_path,
+                self._emit(
                     Event(
                         run_id=run_id,
                         type=EventType.LLM_CALL_STARTED,
                         agent=agent.name,
                         payload={"agent": agent.name, "message_count": len(messages)},
-                    ),
+                    )
                 )
                 response = await client.messages.create(
                     model=agent.model,
@@ -123,8 +131,7 @@ class DurableRunner:
                     max_tokens=4096,
                 )
                 payload_blocks = _blocks_to_payload(response.content)
-                append(
-                    self.db_path,
+                self._emit(
                     Event(
                         run_id=run_id,
                         type=EventType.LLM_CALL_COMMITTED,
@@ -134,7 +141,7 @@ class DurableRunner:
                             "content": payload_blocks,
                             "stop_reason": response.stop_reason,
                         },
-                    ),
+                    )
                 )
                 content_blocks = _payload_to_blocks(payload_blocks)
                 stop_reason = response.stop_reason
@@ -143,14 +150,13 @@ class DurableRunner:
             messages.append({"role": "assistant", "content": content_blocks})
 
             if stop_reason == "end_turn":
-                append(
-                    self.db_path,
+                self._emit(
                     Event(
                         run_id=run_id,
                         type=EventType.AGENT_STEP_FINISHED,
                         agent=agent.name,
                         payload={"agent": agent.name},
-                    ),
+                    )
                 )
                 # Extract first text block
                 for block in content_blocks:
@@ -176,8 +182,7 @@ class DurableRunner:
                         if tool is None:
                             raise ValueError(f"Unknown tool: {tool_name}")
                         idempotency_key = getattr(tool, "idempotency_key", None)
-                        append(
-                            self.db_path,
+                        self._emit(
                             Event(
                                 run_id=run_id,
                                 type=EventType.TOOL_CALL_STARTED,
@@ -188,29 +193,27 @@ class DurableRunner:
                                     "tool_input": tool_input,
                                     "idempotency_key": idempotency_key,
                                 },
-                            ),
+                            )
                         )
                         try:
                             result_str = str(await tool.dispatch(**tool_input))
                         except HandoffSignal as hs:
                             # Commit handoff event (guard against double-commit on replay)
                             if state.committed_handoff is None:
-                                append(
-                                    self.db_path,
+                                self._emit(
                                     Event(
                                         run_id=run_id,
                                         type=EventType.HANDOFF_COMMITTED,
                                         agent=agent.name,
                                         payload={"target": hs.target, "payload": hs.payload},
-                                    ),
+                                    )
                                 )
                             return AgentResult(
                                 output="",
                                 messages=messages,
                                 handoff=Handoff(hs.target, hs.payload),
                             )
-                        append(
-                            self.db_path,
+                        self._emit(
                             Event(
                                 run_id=run_id,
                                 type=EventType.TOOL_CALL_COMMITTED,
@@ -220,7 +223,7 @@ class DurableRunner:
                                     "tool_name": tool_name,
                                     "result": result_str,
                                 },
-                            ),
+                            )
                         )
 
                     tool_results.append(ToolResult(tool_use_id=tool_use_id, content=result_str))

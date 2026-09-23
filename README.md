@@ -79,13 +79,16 @@ src/waypoint/       # core library
   engine.py         # durable execution engine  (M3+)
   events.py         # event log (SQLite)         (M3+)
   workflow.py       # Workflow + WorkflowRunner  (M4+)
-  api.py            # FastAPI + SSE              (planned)
+  api.py            # FastAPI + SSE              (M6+)
+  pubsub.py         # in-process event bus      (M6+)
+  workflows.py      # built-in workflow registry (M6+)
 tests/
   test_version.py        # CLI smoke test
   test_agent.py          # agent loop tests (mocked client)
   test_engine.py         # durable engine scenarios      (M3+)
   test_workflow.py       # multi-agent workflow tests    (M4+)
   test_crash_resume.py   # crash + resume integration    (M5+)
+  test_api.py            # FastAPI + SSE tests           (M6+)
 examples/
   research_team.py  # Planner → Researcher       (M4+)
 docs/
@@ -100,7 +103,23 @@ docs/
 | M3 | ✅ done | Event-sourced durable engine: SQLite event log, write-ahead pattern, replay + resume |
 | M4 | ✅ done | Multi-agent workflows + handoffs: `Workflow`, `WorkflowRunner`, `HANDOFF_COMMITTED` event, `research_team` example |
 | M5 | ✅ done | Crash + resume: `waypoint serve` replays interrupted runs; `--kill-after N` flag; exactly-once tool execution verified by integration test |
-| M6 | planned | FastAPI + SSE backend, timeline UI, Docker Compose |
+| M6 | ✅ done | FastAPI + SSE backend: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` SSE stream, `POST /debug/kill-worker` crash button |
+| M7 | planned | Timeline UI: HTMX + SSE frontend; live event cards, agent swimlanes, "resumed here" marker, Kill Worker button |
+
+## What works now (M6)
+
+### FastAPI + SSE backend
+
+- **`api.py`** (`src/waypoint/api.py`) — `create_app(db_path, dev_mode, kill_after)` factory returns a configured FastAPI app with a lifespan that migrates the DB, schedules the optional kill timer, and resumes interrupted runs on startup.
+- **`POST /runs`** — accepts `{"workflow": str, "prompt": str}`; returns `202 {"run_id": str}`; starts the workflow as an `asyncio.create_task` background task; 404 for unknown workflows.
+- **`GET /runs/{run_id}`** — returns `{"run_id", "status", "workflow", "event_count"}`; status derived from event log (`"running"` / `"finished"` / `"failed"`); 404 if no events.
+- **`GET /runs/{run_id}/events`** — SSE stream (`text/event-stream`); first replays all historical events (reconnect-safe), then streams live events via an in-process `asyncio.Queue`; 25 s keepalive pings; closes cleanly when the run finishes.
+- **`POST /debug/kill-worker`** — terminates the process with `SIGTERM` for the crash-demo; only active when `WAYPOINT_DEV=1` or `--dev` flag; 403 otherwise.
+- **`pubsub.py`** (`src/waypoint/pubsub.py`) — `EventBus`: `subscribe/unsubscribe/publish/close_run`; backed by `asyncio.Queue`; thread-safe within the event loop.
+- **`workflows.py`** (`src/waypoint/workflows.py`) — `BUILTIN_WORKFLOWS` dict; re-declares the `research_team` workflow without importing from `examples/`.
+- **`DurableRunner._emit` / `WorkflowRunner._emit`** — every `append()` call is now wrapped in `_emit()`, which writes to the DB and fans out to the `EventBus` in one step; `event_bus=None` default preserves backward compatibility with all existing tests.
+- **`waypoint serve`** now starts uvicorn on `http://0.0.0.0:8000`; accepts `--host`, `--port`, `--dev`, `--kill-after` flags.
+- **Tests** (`tests/test_api.py`) — six scenarios: unknown workflow 404, run not found 404, kill forbidden without dev mode, create run returns run_id (monkeypatched runner), status from seeded events, SSE history replay.
 
 ## What works now (M5)
 
@@ -145,7 +164,7 @@ docs/
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-The FastAPI + SSE backend and timeline UI are planned — see the milestone table.
+The timeline UI is planned — see the milestone table.
 
 ## Contributing
 
