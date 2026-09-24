@@ -4,6 +4,8 @@
 
 Most agent frameworks treat LLM workflows like stateless HTTP handlers — crash mid-run, lose everything. Waypoint is a reference implementation of *durable agent orchestration*: every LLM call, tool execution, and handoff is committed to an event log before it's considered done. Kill the process, restart it, and Waypoint replays the log to resume from the exact next pending step — no repeated API charges, no double-executed tools.
 
+![Timeline UI mid-resume — swimlanes with the "resumed here" marker](docs/screenshot.png)
+
 ## Demo (60 seconds)
 
 ```bash
@@ -103,12 +105,16 @@ tests/
   test_api.py            # FastAPI + SSE tests           (M6+)
   test_ui.py             # timeline UI + RUN_RESUMED     (M7+)
   test_code_reviewer.py  # read_file tool + registry     (M8+)
+scripts/
+  record_demo.sh         # crash-resume demo driver (curl + uv) (M9+)
 examples/
   research_team.py       # Planner → Researcher         (M4+)
   code_reviewer.py       # Reader → Critic → Summarizer (M8+)
   fixtures/
     buggy_sample.py      # intentional-bug fixture for code_reviewer demo
 docs/
+  screenshot.png         # timeline UI mid-resume (M9+)
+  demo.gif               # animated demo — see scripts/record_demo.sh to regenerate (M9+)
 ```
 
 ## Milestones
@@ -123,6 +129,15 @@ docs/
 | M6 | ✅ done | FastAPI + SSE backend: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` SSE stream, `POST /debug/kill-worker` crash button |
 | M7 | ✅ done | Timeline UI: Alpine.js + Pico.css SPA; live SSE event cards, per-agent swimlanes, "resumed here" marker, Kill Worker button |
 | M8 | ✅ done | Code reviewer workflow: Reader → Critic → Summarizer; `read_file` tool with allowlist; `examples/fixtures/buggy_sample.py` deterministic demo fixture |
+| M9 | ✅ done | Demo script + screenshot: `scripts/record_demo.sh` drives crash-resume end-to-end; `docs/screenshot.png` shows timeline mid-resume |
+
+## What works now (M9)
+
+### Demo script + screenshot
+
+- **`scripts/record_demo.sh`** — bash script that drives the full crash-resume sequence without manual steps: starts the server with `--kill-after 20`, POSTs a `research_team` run, streams SSE events until the process self-destructs, restarts the server, streams events until `RUN_FINISHED`, then holds the server alive so a screenshot can be captured. Requires `bash >= 4`, `curl`, and `uv`; uses only the public HTTP API (`POST /runs`, `GET /runs/{id}/events`, no internal imports).
+- **`docs/screenshot.png`** — real screenshot of the timeline UI mid-resume: swimlanes show Planner and Researcher events committed before the crash, the dashed "resumed here" divider, and the remaining Researcher events streamed after restart.
+- **`docs/demo.gif`** — placeholder; to regenerate, install [vhs](https://github.com/charmbracelet/vhs) and record `bash scripts/record_demo.sh`, or use any screen recorder and save output to `docs/demo.gif`. See the header comment in `scripts/record_demo.sh` for a `demo.tape` sketch.
 
 ## What works now (M8)
 
@@ -217,7 +232,7 @@ uv run python examples/code_reviewer.py
 - **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
 - **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
 
-The timeline UI is live — open `http://localhost:8000` after `uv run waypoint serve`. Two workflows are available: **research_team** and **code_reviewer**.
+The full stack is live — open `http://localhost:8000` after `uv run waypoint serve`. Two workflows are available: **research_team** and **code_reviewer**. To run the scripted crash-resume demo end-to-end: `bash scripts/record_demo.sh`.
 
 ## Contributing
 
