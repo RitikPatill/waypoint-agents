@@ -1,44 +1,60 @@
-# Waypoint
+# Waypoint — Durable Multi-Agent Workflows with a Visual Timeline
 
-**Your agents crash. Waypoint resumes them.**
+> Event-sourced multi-agent orchestrator: kill it mid-run, restart it, watch it resume from the last checkpoint in a live timeline UI.
 
-Most agent frameworks treat LLM workflows like stateless HTTP handlers — crash mid-run, lose everything. Waypoint is a reference implementation of *durable agent orchestration*: every LLM call, tool execution, and handoff is committed to an event log before it's considered done. Kill the process, restart it, and Waypoint replays the log to resume from the exact next pending step — no repeated API charges, no double-executed tools.
+<!-- TODO: replace with a 5-10 second demo gif. Record with ScreenToGif on
+     Windows or peek on macOS. Save to docs/demo.gif and update path here. -->
+![demo](docs/demo.gif)
 
-![Timeline UI mid-resume — swimlanes with the "resumed here" marker](docs/screenshot.png)
+## What it is
 
-## Demo (60 seconds)
+Waypoint is a reference implementation of durable agent orchestration. You define a workflow as a directed graph of cooperating agents; the engine executes it while appending every LLM call, tool execution, and handoff to a SQLite event log before treating each step as done. Kill the process at any point, restart it, and Waypoint replays the log to resume from the exact next pending step — no repeated API charges, no double-executed tools.
+
+The project ships two example workflows (a two-agent research team and a three-agent code reviewer), a FastAPI + SSE backend that streams events to the browser as they land, and a lightweight timeline UI with per-agent swimlanes, click-to-expand event cards, and a "Kill Worker" button for the crash-resume demo.
+
+## Quickstart
 
 ```bash
-cp .env.example .env   # add your ANTHROPIC_API_KEY
-uv run waypoint serve  # or: docker compose up
+git clone https://github.com/RitikPatill/waypoint-agents.git
+cd waypoint-agents
+uv sync
+cp .env.example .env
+# edit .env — set ANTHROPIC_API_KEY
+uv run waypoint serve
 ```
 
-Open `http://localhost:8000`. Two workflows are selectable from the dropdown.
+Open `http://localhost:8000`. To run without Docker or uv, see the Docker path below:
+
+```bash
+cp .env.example .env
+docker compose up
+```
+
+Tests pass without an API key:
+
+```bash
+uv run pytest
+```
+
+## Usage
+
+Open `http://localhost:8000`. The run form offers two workflows from a dropdown.
 
 **Crash-resume demo (research_team)**
 
-1. Select **research_team** — prompt: *"State of MCP servers in 2026"*
-2. Watch the timeline light up: Planner thinks → emits plan → hands off to Researcher
-3. Researcher starts calling `fetch_url` — three URL cards stream in live
-4. Click the red **Kill Worker** button mid-run — process dies
-5. Run `uv run waypoint serve` again — timeline reconnects
-6. Waypoint replays the event log, notices the Researcher was mid-loop, resumes from the last committed tool call, finishes cleanly
-7. Final summary appears; the timeline shows a **"resumed here"** marker
+Select `research_team`, enter a prompt such as `State of MCP servers in 2026`, and click Run. The timeline shows the Planner agent reasoning and handing off to the Researcher, which begins streaming `fetch_url` tool calls as cards. Click the red **Kill Worker** button mid-run. Run `uv run waypoint serve` again — Waypoint replays the event log, detects the interrupted run, resumes from the last committed tool call, and marks the timeline with a dashed "resumed here" divider.
 
-**Static code review demo (code_reviewer)**
+**Code reviewer demo (code_reviewer)**
 
-1. Select **code_reviewer** — prompt: `examples/fixtures/buggy_sample.py`
-2. Reader agent reads the file via the allowlisted `read_file` tool
-3. Critic identifies bugs with line references, hands off to Summarizer
-4. Summarizer produces a P1/P2/P3 action list; all three swimlanes fill in sequence
+Select `code_reviewer` and enter `examples/fixtures/buggy_sample.py`. Reader reads the file, Critic identifies bugs with line references, and Summarizer produces a P1/P2/P3 action list across three swimlanes.
 
-## Why durable matters
+To start a run without the browser:
 
-| Without Waypoint | With Waypoint |
-|---|---|
-| Crash mid-tool-call → silent data loss | Every side effect is committed before acknowledged |
-| Restart → re-run everything from scratch | Replay folds the event log; no duplicate LLM charges |
-| Hard to debug what an agent actually did | Full event history queryable in SQLite |
+```bash
+curl -s -X POST http://localhost:8000/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"workflow": "research_team", "prompt": "State of MCP servers in 2026"}'
+```
 
 ## Architecture
 
@@ -54,190 +70,43 @@ flowchart LR
     Replay --> EventLog
 ```
 
-**Event types:** `RUN_STARTED`, `RUN_RESUMED`, `AGENT_STEP_STARTED`, `LLM_CALL_STARTED`, `LLM_CALL_COMMITTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_COMMITTED`, `HANDOFF_COMMITTED`, `AGENT_STEP_FINISHED`, `RUN_FINISHED`, `RUN_FAILED`
+The core invariant: no side effect happens without a preceding committed event, and no event is committed until its side effect has succeeded and been persisted with its result. Replay is a pure fold over the log — it never touches the Anthropic API.
 
-**The invariant:** no side effect happens without a preceding committed event, and no event is committed until its side effect has succeeded and been persisted with its result. Replay is a pure fold over the log.
-
-## Quickstart
-
-### With uv (recommended)
-
-```bash
-uv sync
-cp .env.example .env
-# edit .env — set ANTHROPIC_API_KEY
-uv run waypoint --version   # works now
-uv run pytest               # all tests pass without an API key
-uv run waypoint serve       # resume any interrupted runs
-uv run python examples/research_team.py  # requires ANTHROPIC_API_KEY
-uv run python examples/code_reviewer.py  # reviews examples/fixtures/buggy_sample.py
-```
-
-### With Docker
-
-```bash
-cp .env.example .env
-docker compose up
-```
-
-## Project layout
+## Project structure
 
 ```
 src/waypoint/       # core library
-  cli.py            # typer CLI entry point
-  tools.py          # Tool + ToolResult primitives
-  agent.py          # Agent: Anthropic tool-use loop
-  builtin_tools.py  # fetch_url, sum_numbers, make_read_file_tool
-  engine.py         # durable execution engine  (M3+)
-  events.py         # event log (SQLite)         (M3+)
-  workflow.py       # Workflow + WorkflowRunner  (M4+)
-  api.py            # FastAPI + SSE              (M6+)
-  pubsub.py         # in-process event bus      (M6+)
-  workflows.py      # built-in workflow registry (M6+)
-  static/
-    index.html      # timeline SPA (Alpine.js)  (M7+)
-tests/
-  test_version.py        # CLI smoke test
-  test_agent.py          # agent loop tests (mocked client)
-  test_engine.py         # durable engine scenarios      (M3+)
-  test_workflow.py       # multi-agent workflow tests    (M4+)
-  test_crash_resume.py   # crash + resume integration    (M5+)
-  test_api.py            # FastAPI + SSE tests           (M6+)
-  test_ui.py             # timeline UI + RUN_RESUMED     (M7+)
-  test_code_reviewer.py  # read_file tool + registry     (M8+)
-scripts/
-  record_demo.sh         # crash-resume demo driver (curl + uv) (M9+)
-examples/
-  research_team.py       # Planner → Researcher         (M4+)
-  code_reviewer.py       # Reader → Critic → Summarizer (M8+)
-  fixtures/
-    buggy_sample.py      # intentional-bug fixture for code_reviewer demo
-docs/
-  screenshot.png         # timeline UI mid-resume (M9+)
-  demo.gif               # animated demo — see scripts/record_demo.sh to regenerate (M9+)
+  engine.py         # durable execution engine: write-ahead pattern, replay, resume
+  events.py         # SQLite event log: append, list, replay fold
+  workflow.py       # Workflow + WorkflowRunner + HandoffSignal
+  agent.py          # Anthropic tool-use loop
+  api.py            # FastAPI routes + SSE streaming
+  pubsub.py         # in-process asyncio event bus
+  workflows.py      # built-in workflow registry
+  builtin_tools.py  # fetch_url, read_file, sum_numbers
+  cli.py            # Typer CLI entry point
+  static/           # timeline SPA (Alpine.js + Pico.css, no bundler)
+tests/              # pytest suite; all scenarios run without an API key
+examples/           # research_team.py, code_reviewer.py, fixtures/
+docs/               # architecture reference, roadmap, screenshot, demo gif
+scripts/            # record_demo.sh — drives crash-resume end-to-end via curl
 ```
 
-## Milestones
+## Roadmap
 
-| Milestone | Status | Description |
-|---|---|---|
-| M1 | ✅ done | Scaffold, README, CLI stub, CI wiring |
-| M2 | ✅ done | Agent core: Tool primitive, tool-use loop, builtin tools |
-| M3 | ✅ done | Event-sourced durable engine: SQLite event log, write-ahead pattern, replay + resume |
-| M4 | ✅ done | Multi-agent workflows + handoffs: `Workflow`, `WorkflowRunner`, `HANDOFF_COMMITTED` event, `research_team` example |
-| M5 | ✅ done | Crash + resume: `waypoint serve` replays interrupted runs; `--kill-after N` flag; exactly-once tool execution verified by integration test |
-| M6 | ✅ done | FastAPI + SSE backend: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` SSE stream, `POST /debug/kill-worker` crash button |
-| M7 | ✅ done | Timeline UI: Alpine.js + Pico.css SPA; live SSE event cards, per-agent swimlanes, "resumed here" marker, Kill Worker button |
-| M8 | ✅ done | Code reviewer workflow: Reader → Critic → Summarizer; `read_file` tool with allowlist; `examples/fixtures/buggy_sample.py` deterministic demo fixture |
-| M9 | ✅ done | Demo script + screenshot: `scripts/record_demo.sh` drives crash-resume end-to-end; `docs/screenshot.png` shows timeline mid-resume |
-
-## What works now (M9)
-
-### Demo script + screenshot
-
-- **`scripts/record_demo.sh`** — bash script that drives the full crash-resume sequence without manual steps: starts the server with `--kill-after 20`, POSTs a `research_team` run, streams SSE events until the process self-destructs, restarts the server, streams events until `RUN_FINISHED`, then holds the server alive so a screenshot can be captured. Requires `bash >= 4`, `curl`, and `uv`; uses only the public HTTP API (`POST /runs`, `GET /runs/{id}/events`, no internal imports).
-- **`docs/screenshot.png`** — real screenshot of the timeline UI mid-resume: swimlanes show Planner and Researcher events committed before the crash, the dashed "resumed here" divider, and the remaining Researcher events streamed after restart.
-- **`docs/demo.gif`** — placeholder; to regenerate, install [vhs](https://github.com/charmbracelet/vhs) and record `bash scripts/record_demo.sh`, or use any screen recorder and save output to `docs/demo.gif`. See the header comment in `scripts/record_demo.sh` for a `demo.tape` sketch.
-
-## What works now (M8)
-
-### Code reviewer workflow
-
-- **`make_read_file_tool(allowed_dirs)`** (`src/waypoint/builtin_tools.py`) — factory function returning a `read_file` Tool; resolves paths with `.resolve()`, rejects traversal outside `allowed_dirs` with a structured error string (never raises), truncates files at 8 000 chars.
-- **`code_reviewer` workflow** (`src/waypoint/workflows.py`) — three-agent pipeline: Reader (reads the file and hands off source code to Critic), Critic (identifies bugs/smells with line references, hands off critique to Summarizer), Summarizer (distils a P1/P2/P3 action list).
-- **`examples/fixtures/buggy_sample.py`** — ~60-line deterministic fixture with six intentional bugs: mutable default argument, off-by-one, unhandled division by zero, shadowed built-in, missing return value, bare `except`.
-- **`examples/code_reviewer.py`** — standalone runner mirroring `research_team.py`; defaults to the fixture path; accepts an optional CLI arg for a custom file.
-- **`BUILTIN_WORKFLOWS`** now includes `"code_reviewer"`, surfacing it in the UI dropdown automatically.
-- **Tests** (`tests/test_code_reviewer.py`) — three scenarios: allowed read returns content, blocked path returns error string without raising, registry contains correct structure.
-
-#### Demo
-
-```bash
-uv run waypoint serve
-# open http://localhost:8000, select "code_reviewer", type: examples/fixtures/buggy_sample.py
-
-# or run headlessly:
-uv run python examples/code_reviewer.py
-```
-
-## What works now (M7)
-
-### Live timeline UI
-
-- **`GET /`** — serves `src/waypoint/static/index.html` (Alpine.js + Pico.css classless, no bundler)
-- **`GET /workflows`** — returns `{"workflows": [...]}` for the run form dropdown
-- **`RUN_RESUMED` event** — emitted once when `WorkflowRunner.run()` detects an interrupted run; streams to any connected SSE client
-- **Timeline layout** — per-agent swimlanes rendered as flexbox columns; events appear as `<details>` cards with click-to-expand JSON payload
-- **Status pill** — reflects `idle / running / resumed / finished / failed / crashed` derived from received events
-- **"Resumed here" marker** — dashed horizontal divider injected into every swimlane at the timestamp of the `RUN_RESUMED` event
-- **Kill Worker button** — visible only when `status === 'running'`; POSTs to `/debug/kill-worker` and sets status to `'crashed'` optimistically
-- **SSE reconnect safety** — `EventSource` auto-reconnects; the SSE endpoint replays full history on reconnect; `events` array is cleared on new run start
-- **Tests** (`tests/test_ui.py`) — four scenarios: `GET /` returns HTML with expected content, `GET /workflows` returns workflow list, `RUN_RESUMED` enum value, `RUN_RESUMED` emitted on resume
-
-## What works now (M6)
-
-### FastAPI + SSE backend
-
-- **`api.py`** (`src/waypoint/api.py`) — `create_app(db_path, dev_mode, kill_after)` factory returns a configured FastAPI app with a lifespan that migrates the DB, schedules the optional kill timer, and resumes interrupted runs on startup.
-- **`POST /runs`** — accepts `{"workflow": str, "prompt": str}`; returns `202 {"run_id": str}`; starts the workflow as an `asyncio.create_task` background task; 404 for unknown workflows.
-- **`GET /runs/{run_id}`** — returns `{"run_id", "status", "workflow", "event_count"}`; status derived from event log (`"running"` / `"finished"` / `"failed"`); 404 if no events.
-- **`GET /runs/{run_id}/events`** — SSE stream (`text/event-stream`); first replays all historical events (reconnect-safe), then streams live events via an in-process `asyncio.Queue`; 25 s keepalive pings; closes cleanly when the run finishes.
-- **`POST /debug/kill-worker`** — terminates the process with `SIGTERM` for the crash-demo; only active when `WAYPOINT_DEV=1` or `--dev` flag; 403 otherwise.
-- **`pubsub.py`** (`src/waypoint/pubsub.py`) — `EventBus`: `subscribe/unsubscribe/publish/close_run`; backed by `asyncio.Queue`; thread-safe within the event loop.
-- **`workflows.py`** (`src/waypoint/workflows.py`) — `BUILTIN_WORKFLOWS` dict; re-declares the `research_team` workflow without importing from `examples/`.
-- **`DurableRunner._emit` / `WorkflowRunner._emit`** — every `append()` call is now wrapped in `_emit()`, which writes to the DB and fans out to the `EventBus` in one step; `event_bus=None` default preserves backward compatibility with all existing tests.
-- **`waypoint serve`** now starts uvicorn on `http://0.0.0.0:8000`; accepts `--host`, `--port`, `--dev`, `--kill-after` flags.
-- **Tests** (`tests/test_api.py`) — six scenarios: unknown workflow 404, run not found 404, kill forbidden without dev mode, create run returns run_id (monkeypatched runner), status from seeded events, SSE history replay.
-
-## What works now (M5)
-
-### Crash + resume
-
-- **`list_running_runs(db_path)`** (`src/waypoint/events.py`) — SQL `EXCEPT` query returns `(run_id, workflow_name)` for runs that have `RUN_STARTED` but no `RUN_FINISHED` or `RUN_FAILED`.
-- **`get_run_start_payload(db_path, run_id)`** — retrieves the original prompt and workflow name from the `RUN_STARTED` event.
-- **Idempotent `WorkflowRunner.run()`** — on startup, reads existing events once; if `RUN_STARTED` already exists, skips the append and resumes from `_resume_state()` instead of restarting.
-- **`_resume_state()`** — scans the event log for the last `HANDOFF_COMMITTED` to determine which agent to resume; falls back to `entry_point` + original prompt if none found.
-- **Skip finished agents** — agents with an `AGENT_STEP_FINISHED` event in the log are not re-entered; their committed handoff is replayed to advance to the next agent.
-- **`resume_runs(db_path, workflows, client)`** — top-level async function; calls `list_running_runs`, looks up each workflow by name, calls `WorkflowRunner.run()` for each. Silently skips unknown workflow names.
-- **`waypoint serve`** (`src/waypoint/cli.py`) — migrates DB, reports interrupted runs, calls `resume_runs`. Supports `--kill-after N` (seconds) for crash-resume testing; uses `SIGKILL` on Unix, `SIGTERM` on Windows.
-- **Tests** (`tests/test_crash_resume.py`) — `test_list_running_runs_excludes_finished` seeds three runs and verifies only the interrupted one is returned; `test_resume_completes_with_exactly_once_tool_execution` pre-seeds a mid-crash DB (tool already committed), resumes, and asserts the tool fn is not called again and `RUN_FINISHED` is written.
-
-## What works now (M4)
-
-### Multi-agent workflows + handoffs
-
-- **`workflow.py`** (`src/waypoint/workflow.py`) — `Workflow` (named dict of `Agent` nodes + entry point), `WorkflowRunner` (executes agents in sequence, routing via `handoff`), `HandoffSignal` (exception raised by the injected `handoff` tool), `Handoff` (target + payload dataclass).
-- **`handoff` tool injection** — `WorkflowRunner` injects a `handoff` tool into each agent listing all other agent names as valid targets. The tool raises `HandoffSignal`; the engine catches it, commits a `HANDOFF_COMMITTED` event, and returns an `AgentResult` with a `handoff` field.
-- **Agent-scoped replay** — `replay(db_path, run_id, agent_name=...)` filters events by agent, preventing a Planner's committed LLM responses from bleeding into the Researcher's cursor on resume.
-- **`research_team` example** (`examples/research_team.py`) — Planner → Researcher with `fetch_url`; run with `uv run python examples/research_team.py` after setting `ANTHROPIC_API_KEY`.
-- **Tests** (`tests/test_workflow.py`) — two scenarios with mocked client: handoff event ordering asserted end-to-end; pre-seeded planner log verified to skip live LLM call on resume with no duplicate `HANDOFF_COMMITTED`.
-
-### M3 (still works)
-
-- **`events.py`** (`src/waypoint/events.py`) — SQLite-backed event log with WAL mode; `migrate()` sets up the schema, `append()` writes a single event, `list_events()` reads in order.
-- **`replay(db_path, run_id)`** — pure fold over the event log; returns a `ReplayState` with committed LLM responses, tool results, and handoff. No side effects.
-- **`DurableRunner`** (`src/waypoint/engine.py`) — write-ahead agent loop: appends `*_STARTED` before the side effect, `*_COMMITTED` after. On startup it replays the log and skips already-completed steps — no duplicate LLM charges, no double tool execution.
-- **Idempotency key** — `Tool.idempotency_key: str | None` stored in `TOOL_CALL_STARTED` events for future deduplication.
-- **Tests** (`tests/test_engine.py`) — five scenarios with mocked client and temp SQLite: replay empty, happy path event ordering, crash between LLM writes, tool result replayed from log, crash between tool writes triggers re-execution.
-
-### M2 (still works)
-
-- **`Tool` + `ToolResult`** (`src/waypoint/tools.py`) — wraps any Python callable (sync or async) with an Anthropic-compatible JSON Schema; `to_api_dict()` produces the shape the SDK expects; `dispatch(**kwargs)` runs sync callables in a thread via `asyncio.to_thread`
-- **`Agent`** (`src/waypoint/agent.py`) — drives a full Anthropic tool-use loop until `stop_reason == "end_turn"`; collects tool-use blocks, dispatches them concurrently with `asyncio.gather`, feeds results back as `tool_result` user turns
-- **Builtin tools** (`src/waypoint/builtin_tools.py`) — `fetch_url` (httpx GET, first 4000 chars) and `sum_numbers` (sum of a list)
-
-### M1 (still works)
-
-- **CLI entry point** — `waypoint --version` via Typer (`src/waypoint/cli.py`)
-- **Package wiring** — `src/waypoint/__init__.py` exports `__version__ = "0.1.0"`; `py.typed` marker included
-- **Toolchain** — `pyproject.toml` with hatchling build, ruff (E/W/F/I), pytest + pytest-asyncio pointed at `tests/`
-
-The full stack is live — open `http://localhost:8000` after `uv run waypoint serve`. Two workflows are available: **research_team** and **code_reviewer**. To run the scripted crash-resume demo end-to-end: `bash scripts/record_demo.sh`.
-
-## Contributing
-
-This is a reference implementation — PRs that add features outside the scope above are unlikely to be merged. Bug fixes and clearer explanations are welcome.
+- [ ] PostgreSQL backend with `LISTEN/NOTIFY` to support multi-process workers
+- [ ] `LLMClient` protocol abstraction to support OpenAI and Gemini alongside Anthropic
+- [ ] Per-agent retry policies and wall-clock timeout budgets
+- [ ] JSON Schema validation for typed handoff payloads between agents
+- [ ] Workflow versioning: tag runs with the workflow definition hash so replays use the original configuration
 
 ## License
 
-MIT © Ritik, 2026
+MIT — see LICENSE.
+
+---
+
+Built autonomously by [autodev](https://github.com/RitikPatill/autodev),
+a multi-agent orchestrator I designed. Each commit in this repo was
+authored by me; the implementation work was performed by Sonnet under
+the orchestrator's control. Read the orchestrator's README to see how.
