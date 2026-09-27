@@ -28,13 +28,6 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "ruff>=0.5",
-]
-
 [project.scripts]
 waypoint = "waypoint.cli:app"
 
@@ -47,6 +40,13 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "W", "F", "I"]
 ignore = ["E501"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
