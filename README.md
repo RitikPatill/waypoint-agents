@@ -1,5 +1,9 @@
 # Waypoint — Durable Multi-Agent Workflows with a Visual Timeline
 
+
+> **Video walkthrough:** https://youtu.be/RJcQt1JwUP0
+> **60-second overview:** https://youtu.be/nEWEkPkN_co
+
 > Event-sourced multi-agent orchestrator: kill it mid-run, restart it, watch it resume from the last checkpoint in a live timeline UI.
 
 <!-- TODO: replace with a 5-10 second demo gif. Record with ScreenToGif on
